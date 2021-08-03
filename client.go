@@ -20,7 +20,23 @@ const (
 	PulsarAddrCN = "pulsar://mqe.tuyacn.com:7285"
 	PulsarAddrEU = "pulsar://mqe.tuyaeu.com:7285"
 	PulsarAddrUS = "pulsar://mqe.tuyaus.com:7285"
+	PulsarAddrIN = "pulsar://mqe.tuyain.com:7285"
 )
+
+var PulsarAddrMap = map[string]string{
+	"eu": PulsarAddrEU,
+	"us": PulsarAddrUS,
+	"cn": PulsarAddrCN,
+	"in": PulsarAddrIN,
+}
+
+type BreakError struct {
+	Err string
+}
+
+func (e *BreakError) Error() string {
+	return e.Err
+}
 
 type Message = msg.Message
 
@@ -68,13 +84,17 @@ func (c *client) NewConsumer(config ConsumerConfig) (Consumer, error) {
 		tylog.String("pulsar", c.Addr),
 		tylog.String("topic", config.Topic),
 	)
-
-	errs := make(chan error, 10)
-	go func() {
-		for err := range errs {
-			tylog.Error("async errors", tylog.ErrorField(err))
-		}
-	}()
+	var errs chan error
+	if config.Errs == nil {
+		errs = make(chan error, 10)
+		go func() {
+			for err := range errs {
+				tylog.Error("async errors", tylog.String("pulsar", c.Addr), tylog.ErrorField(err))
+			}
+		}()
+	} else {
+		errs = config.Errs
+	}
 	cfg := manage.ConsumerConfig{
 		ClientConfig: manage.ClientConfig{
 			Addr:       c.Addr,
@@ -100,9 +120,10 @@ func (c *client) NewConsumer(config ConsumerConfig) (Consumer, error) {
 			cfg.Topic = fmt.Sprintf("%s-partition-%d", originTopic, i)
 			mc := manage.NewManagedConsumer(c.pool, cfg)
 			list = append(list, &consumerImpl{
-				csm:     mc,
-				topic:   cfg.Topic,
-				stopped: make(chan struct{}),
+				csm:       mc,
+				topic:     cfg.Topic,
+				stopped:   nil,
+				logHandle: config.Log,
 			})
 		}
 		consumerList := &ConsumerList{
@@ -122,9 +143,10 @@ func (c *client) NewConsumer(config ConsumerConfig) (Consumer, error) {
 		tylog.String("topic", config.Topic),
 	)
 	return &consumerImpl{
-		csm:     mc,
-		topic:   cfg.Topic,
-		stopped: make(chan struct{}),
+		csm:       mc,
+		topic:     cfg.Topic,
+		stopped:   nil,
+		logHandle: config.Log,
 	}, nil
 
 }

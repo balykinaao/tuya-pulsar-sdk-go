@@ -34,37 +34,39 @@ func SetGlobalLog(appName string, prod bool, opts ...OptionFunc) {
 }
 
 func NewLog(config *LogConfig) *zap.Logger {
-	if !tyutils.IsDir(config.dir) {
-		err := tyutils.Mkdir(config.dir)
-		if err != nil {
-			panic("mkdir logs failed")
-		}
-	}
-	filePath := config.dir + "/" + config.appName + ".log"
-
-	// lumberjack 实现了一些日志分割的功能
-	jLoger := &lumberjack.Logger{
-		Filename:   filePath,
-		MaxSize:    config.maxSize,
-		MaxBackups: config.maxBackups,
-	}
-	jLoger.LocalTime = config.localTime
-
 	// writer
 	var writer zapcore.WriteSyncer
-	if config.multiWrite {
-		w1 := zapcore.AddSync(jLoger)
-		// 日志同时在终端输出
-		w2, closeOut, err := zap.Open([]string{"stderr"}...)
-		if err != nil {
-			if closeOut != nil {
-				closeOut()
-			}
-			panic(err)
+	// 日志同时在终端输出
+	stderr, closeOut, err := zap.Open([]string{"stderr"}...)
+	if err != nil {
+		if closeOut != nil {
+			closeOut()
 		}
-		writer = zapcore.NewMultiWriteSyncer(w1, w2)
+		panic(err)
+	}
+
+	if config.multiWrite {
+		if !tyutils.IsDir(config.dir) {
+			err := tyutils.Mkdir(config.dir)
+			if err != nil {
+				panic("mkdir logs failed")
+			}
+		}
+		filePath := config.dir + "/" + config.appName + ".log"
+
+		// lumberjack 实现了一些日志分割的功能
+		jLoger := &lumberjack.Logger{
+			Filename:   filePath,
+			MaxSize:    config.maxSize,
+			MaxBackups: config.maxBackups,
+		}
+		jLoger.LocalTime = config.localTime
+		RotatePeriod(jLoger, config.rotatePeriodSecond)
+
+		w1 := zapcore.AddSync(jLoger)
+		writer = zapcore.NewMultiWriteSyncer(w1, stderr)
 	} else {
-		writer = zapcore.AddSync(jLoger)
+		writer = zapcore.AddSync(stderr)
 	}
 
 	// encoder
@@ -98,7 +100,6 @@ func NewLog(config *LogConfig) *zap.Logger {
 		l = l.WithOptions(hks...)
 	}
 
-	RotatePeriod(jLoger, config.rotatePeriodSecond)
 	return l
 }
 

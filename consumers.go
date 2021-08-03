@@ -18,13 +18,12 @@ type ConsumerList struct {
 
 func (l *ConsumerList) ReceiveAndHandle(ctx context.Context, handler PayloadHandler) {
 	wg := sync.WaitGroup{}
-	for i := 0; i < len(l.list); i++ {
-		safe := i
-		wg.Add(1)
-		go func() {
-			l.list[safe].ReceiveAndHandle(ctx, handler)
-			wg.Done()
-		}()
+	wg.Add(len(l.list))
+	for _, obj := range l.list {
+		go func(obj_ *consumerImpl) {
+			defer wg.Done()
+			obj_.ReceiveAndHandle(ctx, handler)
+		}(obj)
 	}
 	go l.CronFlow()
 	wg.Wait()
@@ -80,13 +79,12 @@ func (l *ConsumerList) Stop() {
 	tylog.Info("consumer will stop, waiting...", tylog.String("topic", l.Topic))
 	close(l.Stopped)
 	wg := sync.WaitGroup{}
-	for i := 0; i < len(l.list); i++ {
-		safei := i
-		wg.Add(1)
-		go func() {
-			l.list[safei].Stop()
-			wg.Done()
-		}()
+	wg.Add(len(l.list))
+	for _, obj := range l.list {
+		go func(obj_ *consumerImpl) {
+			defer wg.Done()
+			obj_.Stop()
+		}(obj)
 	}
 	wg.Wait()
 	tylog.Info("consumer stopped", tylog.String("topic", l.Topic))

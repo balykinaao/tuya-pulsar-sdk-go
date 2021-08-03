@@ -12,9 +12,32 @@ import (
 	"github.com/tuya/tuya-pulsar-sdk-go/pkg/tylog"
 )
 
+const (
+	SpendDecode     = "decode"
+	SpendUnactive   = "unactive"
+	SpendConsumerId = "ConsumerID"
+	SpendHandle     = "handle"
+	SpendAck        = "ack"
+	SpendAll        = "totall"
+)
+
+type SpendLogFunc func(m *Message, spends map[string]time.Duration)
+
+var defaultLogHandle = func(m *Message, spends map[string]time.Duration) {
+	fields := make([]zap.Field, 0, 10)
+	fields = append(fields, tylog.Any("msgID", m.Msg.GetMessageId()))
+	fields = append(fields, tylog.String("topic", m.Topic))
+	for slug, spend := range spends {
+		fields = append(fields, tylog.String(slug+" spend", spend.String()))
+	}
+	tylog.Debug("Handler trace info", fields...)
+}
+
 type ConsumerConfig struct {
 	Topic string
 	Auth  AuthProvider
+	Errs  chan error
+	Log   SpendLogFunc
 }
 
 type consumerImpl struct {
@@ -23,6 +46,7 @@ type consumerImpl struct {
 	cancelFunc context.CancelFunc
 	stopFlag   uint32
 	stopped    chan struct{}
+	logHandle  SpendLogFunc
 }
 
 func (c *consumerImpl) ReceiveAsync(ctx context.Context, queue chan Message) {
@@ -36,6 +60,7 @@ func (c *consumerImpl) ReceiveAsync(ctx context.Context, queue chan Message) {
 
 func (c *consumerImpl) ReceiveAndHandle(ctx context.Context, handler PayloadHandler) {
 	queue := make(chan Message, 228)
+	c.stopped = make(chan struct{})
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancelFunc = cancel
 	go c.ReceiveAsync(ctx, queue)
@@ -58,17 +83,19 @@ func (c *consumerImpl) ReceiveAndHandle(ctx context.Context, handler PayloadHand
 }
 
 func (c *consumerImpl) Handler(ctx context.Context, handler PayloadHandler, m *Message) {
-	fields := make([]zap.Field, 0, 10)
-	fields = append(fields, tylog.Any("msgID", m.Msg.GetMessageId()))
-	fields = append(fields, tylog.String("topic", m.Topic))
+	spends := make(map[string]time.Duration, 10)
+
 	defer func(start time.Time) {
-		spend := time.Since(start)
-		fields = append(fields, tylog.String("total spend", spend.String()))
-		tylog.Debug("Handler trace info", fields...)
+		spends[SpendAll] = time.Since(start)
+		if c.logHandle != nil {
+			c.logHandle(m, spends)
+		} else {
+			defaultLogHandle(m, spends)
+		}
 	}(time.Now())
 
-	now := time.Now()
 	var list []*msg.SingleMessage
+	now := time.Now()
 	var err error
 	num := m.Meta.GetNumMessagesInBatch()
 	if num > 0 && m.Meta.NumMessagesInBatch != nil {
@@ -78,26 +105,24 @@ func (c *consumerImpl) Handler(ctx context.Context, handler PayloadHandler, m *M
 			return
 		}
 	}
-	spend := time.Since(now)
-	fields = append(fields, tylog.String("decode spend", spend.String()))
+	spends[SpendDecode] = time.Since(now)
 
 	now = time.Now()
 	if c.csm.Unactive() {
 		tylog.Warn("unused msg because of consumer is unactivated", tylog.Any("payload", string(m.Payload)))
 		return
 	}
-	spend = time.Since(now)
-	fields = append(fields, tylog.String("Unactive spend", spend.String()))
+	spends[SpendUnactive] = time.Since(now)
 
 	idCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	now = time.Now()
-	if c.csm.ConsumerID(idCtx) != m.ConsumerID {
+	idCheck := c.csm.ConsumerID(idCtx) == m.ConsumerID
+	spends[SpendConsumerId] = time.Since(now)
+	cancel()
+	if !idCheck {
 		tylog.Warn("unused msg because of different ConsumerID", tylog.Any("payload", string(m.Payload)))
 		return
 	}
-	spend = time.Since(now)
-	fields = append(fields, tylog.String("ConsumerID spend", spend.String()))
-	cancel()
 
 	now = time.Now()
 	if len(list) == 0 {
@@ -110,20 +135,20 @@ func (c *consumerImpl) Handler(ctx context.Context, handler PayloadHandler, m *M
 			}
 		}
 	}
-	spend = time.Since(now)
-	fields = append(fields, tylog.String("HandlePayload spend", spend.String()))
+	spends[SpendHandle] = time.Since(now)
 	if err != nil {
 		tylog.Error("handle message failed", tylog.ErrorField(err),
-			tylog.String("topic", m.Topic),
-		)
+			tylog.String("topic", m.Topic))
+		if _, ok := err.(*BreakError); ok {
+			return
+		}
 	}
 
 	now = time.Now()
 	ackCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	err = c.csm.Ack(ackCtx, *m)
 	cancel()
-	spend = time.Since(now)
-	fields = append(fields, tylog.String("Ack spend", spend.String()))
+	spends[SpendAck] = time.Since(now)
 	if err != nil {
 		tylog.Error("ack failed", tylog.ErrorField(err))
 	}
